@@ -7,3 +7,9 @@ rustflags = [
 ]
 
 runner = "wlink -v flash --enable-sdi-print --watch-serial --erase"
+
+# Convert to binary/hex formats after build
+[target.riscv32imc-unknown-none-elf.post-build]
+# Uncomment these if you need .bin or .hex files:
+# objcopy = ["rust-objcopy", "--", "-O", "binary", "$out_dir/hdmi-dummy-display-switch", "$out_dir/hdmi-dummy-display-switch.bin"]
+# objcopy-hex = ["rust-objcopy", "--", "-O", "ihex", "$out_dir/hdmi-dummy-display-switch", "$out_dir/hdmi-dummy-display-switch.hex"]

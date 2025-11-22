@@ -1,104 +1,136 @@
 #![no_std]
 #![no_main]
 
-use core::ptr;
+use ch32_hal as hal;
+use embassy_executor::Spawner;
+use embassy_futures::join::join;
+use embassy_time::Timer;
+use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
+use embassy_usb::driver::EndpointError;
+use embassy_usb::Builder;
+use hal::gpio::{Level, Output, Speed};
+use hal::usbd::Driver;
+use hal::{bind_interrupts, println};
 use panic_halt as _;
-use qingke_rt::entry;
-use ch32v2::ch32v20x;
 
-#[entry]
-fn main() -> ! {
-    let dp = unsafe { ch32v20x::Peripherals::steal() };
-    {
-        // Enable clocks
-        unsafe {
-            dp.RCC.ahbpcenr.write(|w| w.bits(0x00000001)); // DMA
-            dp.RCC.apb2pcenr.write(|w| w.bits(0x0000001D)); // GPIOA, AFIO
-            dp.RCC.apb1pcenr.write(|w| w.bits(0x00800000)); // USB
-        }
+bind_interrupts!(struct Irqs {
+    USB_LP_CAN1_RX0 => hal::usbd::InterruptHandler<hal::peripherals::USBD>;
+});
 
-        // Configure PA0 as output (LED)
-        unsafe {
-            let val = dp.GPIOA.cfglr.read().bits();
-            dp.GPIOA.cfglr.write(|w| w.bits((val & !0xF) | 0x3));
-        }
+#[embassy_executor::task]
+async fn usb_task(mut class: CdcAcmClass<'static, Driver<'static, hal::peripherals::USBD>>) -> ! {
+    loop {
+        class.wait_connection().await;
+        // println!("USB CDC Connected!");
 
-        // Configure PA1 as output high (EEPROM WC)
-        unsafe {
-            let val = dp.GPIOA.cfglr.read().bits();
-            dp.GPIOA.cfglr.write(|w| w.bits((val & !0xF0) | 0x30));
-            dp.GPIOA.outdr.write(|w| w.bits(0x02));
-        }
+        let _ = class
+            .write_packet(b"HDMI Dummy Display Switch - USB CDC Ready!\r\n")
+            .await;
 
-        // Initialize USB
-        usb_init();
+        let _ = echo(&mut class).await;
 
-        let mut counter = 0u32;
-        let mut led_state = false;
+        // println!("USB CDC Disconnected");
+    }
+}
 
-        loop {
-            if counter % 1000000 == 0 {
-                led_state = !led_state;
-                unsafe {
-                    if led_state {
-                        dp.GPIOA.outdr.write(|w| w.bits(0x03));
-                    } else {
-                        dp.GPIOA.outdr.write(|w| w.bits(0x02));
-                    }
-                }
-            }
-            counter = counter.wrapping_add(1);
+async fn echo(
+    class: &mut CdcAcmClass<'static, Driver<'static, hal::peripherals::USBD>>,
+) -> Result<(), EndpointError> {
+    let mut buf = [0; 64];
+    loop {
+        let n = class.read_packet(&mut buf).await?;
+        let data = &buf[..n];
+
+        // Echo back what we received
+        class.write_packet(data).await?;
+
+        // Also print to debug output
+        if let Ok(s) = core::str::from_utf8(data) {
+            // println!("Received: {}", s.trim());
         }
     }
+}
+
+#[embassy_executor::main(entry = "ch32_hal::entry")]
+async fn main(spawner: Spawner) -> ! {
+    // println!("HDMI Dummy Display Switch - Starting...");
+
+    let p = hal::init(hal::Config {
+        rcc: hal::rcc::Config::SYSCLK_FREQ_144MHZ_HSI,
+        ..Default::default()
+    });
+
+    // println!("Initializing USB CDC...");
+
+    // Create USB driver
+    let driver = Driver::new(p.USBD, Irqs, p.PA12, p.PA11);
+
+    // USB device configuration
+    let mut config = embassy_usb::Config::new(0x16c0, 0x27dd);
+    config.manufacturer = Some("ch32-rs");
+    config.product = Some("ZEDBOP");
+    config.serial_number = Some("12345678");
+    config.max_power = 100;
+    config.max_packet_size_0 = 64;
+
+    // Required for CDC
+    config.device_class = 0x02;
+    config.device_sub_class = 0x02;
+    config.device_protocol = 0x00;
+    config.composite_with_iads = false;
+
+    // Create buffers for USB descriptors
+    static mut CONFIG_DESCRIPTOR: [u8; 256] = [0; 256];
+    static mut BOS_DESCRIPTOR: [u8; 256] = [0; 256];
+    static mut CONTROL_BUF: [u8; 64] = [0; 64];
+    static mut STATE: State = State::new();
+
+    let mut builder = unsafe {
+        Builder::new(
+            driver,
+            config,
+            &mut CONFIG_DESCRIPTOR,
+            &mut BOS_DESCRIPTOR,
+            &mut [],
+            &mut CONTROL_BUF,
+        )
+    };
+
+    // Create CDC-ACM class
+    let class = CdcAcmClass::new(&mut builder, unsafe { &mut STATE }, 64);
+
+    // Build USB device
+    let mut usb = builder.build();
+
+    // println!("USB initialized, starting tasks...");
+
+    // Configure PA0 as LED output
+    let mut led = Output::new(p.PA0, Level::Low, Speed::default());
+
+    // Configure PA1 as EEPROM write protect (high = protected)
+    let _wc = Output::new(p.PA1, Level::High, Speed::default());
+
+    // Spawn USB task
+    spawner.spawn(usb_task(class)).unwrap();
+
+    // println!("USB CDC task spawned, running main loop");
+
+    // Run USB device and blink LED concurrently
+    let mut counter = 0u32;
+    join(usb.run(), async {
+        loop {
+            led.set_high();
+            Timer::after_millis(500).await;
+            // println!("LED ON - Counter: {}", counter);
+
+            led.set_low();
+            Timer::after_millis(500).await;
+            // println!("LED OFF - Counter: {}", counter);
+
+            counter += 1;
+        }
+    })
+    .await;
 
     loop {}
-}
-
-fn usb_init() {
-    unsafe {
-        // Enable USB D+ pullup
-        let extend = 0x40023800 as *mut u32;
-        ptr::write_volatile(extend, ptr::read_volatile(extend) | (1 << 7));
-
-        // Reset USB
-        let rcc_apb1prstr = 0x40021010 as *mut u32;
-        ptr::write_volatile(rcc_apb1prstr, 0x00800000);
-        delay(1000);
-        ptr::write_volatile(rcc_apb1prstr, 0x00000000);
-        delay(1000);
-
-        // Initialize USB peripheral
-        let usb_cntr = 0x40005C40 as *mut u16;
-        let usb_btable = 0x40005C50 as *mut u16;
-
-        // Clear power down and reset bits
-        ptr::write_volatile(usb_cntr, 0);
-        delay(100);
-
-        // Set buffer table address to 0
-        ptr::write_volatile(usb_btable, 0);
-
-        // Enable USB interrupts: CTR, RESET, SUSP, WKUP
-        ptr::write_volatile(usb_cntr, 0xBC00);
-    }
-}
-
-fn delay(count: u32) {
-    for _ in 0..count {
-        unsafe {
-            core::arch::asm!("nop");
-        }
-    }
-}
-
-// Dummy USB interrupt handlers (will implement full protocol later)
-#[no_mangle]
-unsafe extern "C" fn USB_HP_CAN1_TX() {
-    // High priority USB interrupt
-}
-
-#[no_mangle]
-unsafe extern "C" fn USB_LP_CAN1_RX0() {
-    // Low priority USB interrupt
-    // This is where we'll handle USB CDC protocol
 }

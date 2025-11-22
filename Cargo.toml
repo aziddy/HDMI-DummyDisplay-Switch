@@ -4,13 +4,15 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# Bare metal dependencies - no HAL, no embassy
-ch32v2 = { version = "0.1.6", features = ["ch32v20x", "rt"] }
-qingke = "0.2"
-qingke-rt = { version = "0.2", features = ["v4"] }
+# Use the ch32-hal from PR #137 that has working USB support
+ch32-hal = { git = "https://github.com/ch32-rs/ch32-hal.git", rev = "55db7d2e83c8ee1885851c2f99f578354476e4d0", features = ["ch32v203g6u6", "memory-x", "embassy", "rt", "time-driver-tim2"], default-features = false }
+
+embassy-executor = { version = "0.7.0", features = ["arch-riscv32", "executor-thread"] }
+embassy-time = "0.4.0"
+embassy-usb = "0.5.1"
+embassy-futures = "0.1.0"
+
 panic-halt = "1.0"
-critical-section = "1.1"
-vcell = "0.1"
 
 [profile.release]
 strip = false
