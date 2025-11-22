@@ -4,10 +4,13 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-ch32-hal = { git = "https://github.com/ch32-rs/ch32-hal.git", features = ["ch32v203g6u6", "memory-x", "embassy", "rt", "time-driver-tim2"], default-features = false }
-embassy-executor = { version = "0.7.0", features = ["arch-riscv32", "executor-thread"] }
-embassy-time = "0.4.0"
+# Bare metal dependencies - no HAL, no embassy
+ch32v2 = { version = "0.1.6", features = ["ch32v20x", "rt"] }
+qingke = "0.2"
+qingke-rt = { version = "0.2", features = ["v4"] }
 panic-halt = "1.0"
+critical-section = "1.1"
+vcell = "0.1"
 
 [profile.release]
 strip = false
